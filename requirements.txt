@@ -1,0 +1,28 @@
+# 基础依赖
+torch>=2.0.0
+transformers>=4.30.0
+accelerate>=0.20.0
+datasets>=2.12.0
+numpy>=1.24.0
+pillow>=9.5.0
+tqdm>=4.65.0
+
+# 视频处理
+torchvision>=0.15.0
+decord>=0.6.0
+av>=10.0.0
+
+# 图像处理
+timm>=0.9.2
+
+# 文本处理
+sentencepiece>=0.1.99
+tokenizers>=0.13.3
+
+# 训练工具
+wandb>=0.15.0
+tensorboard>=2.13.0
+einops>=0.6.1
+
+# 其他工具
+pyyaml>=6.0
