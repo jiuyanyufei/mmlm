@@ -5,9 +5,10 @@
 1. ImageProcessor - 处理图像数据
 2. VideoProcessor - 处理视频数据
 3. TextProcessor - 处理文本数据
-4. MultiModalProcessor - 整合以上处理器，处理多模态输入
+4. AudioProcessor - 处理音频数据
+5. MultiModalProcessor - 整合以上处理器，处理多模态输入和输出
 
-这些处理器将原始数据转换为模型可以使用的张量格式。
+这些处理器将原始数据转换为模型可以使用的张量格式，并支持任意形态的输入和输出。
 """
 import os                                  # 操作系统接口
 import torch                               # PyTorch深度学习库
@@ -20,6 +21,7 @@ import torchvision.transforms as T         # PyTorch视觉变换工具
 from transformers import PreTrainedTokenizer  # Hugging Face分词器
 
 from utils.logger import logger            # 日志工具
+from data.audio_processor import AudioProcessor  # 导入音频处理器
 
 
 class ImageProcessor:
@@ -356,12 +358,13 @@ class MultiModalProcessor:
     """
     多模态处理器
     
-    整合文本、图像和视频处理器，提供统一的接口处理多模态输入。
+    整合文本、图像、视频和音频处理器，提供统一的接口处理多模态输入和输出。
     这个处理器可以同时处理:
     1. 文本数据
     2. 图像数据
     3. 视频数据
-    或者它们的任意组合
+    4. 音频数据
+    或者它们的任意组合，并支持任意模态的输出
     """
     
     def __init__(
@@ -372,6 +375,8 @@ class MultiModalProcessor:
         frame_size: int = 224,           # 视频帧大小
         video_sample_rate: int = 4,      # 视频采样率
         max_text_length: int = 512,      # 最大文本长度
+        audio_sample_rate: int = 16000,  # 音频采样率
+        max_audio_length: int = 10,      # 最大音频长度(秒)
     ):
         """
         初始化多模态处理器
@@ -383,6 +388,8 @@ class MultiModalProcessor:
             frame_size: 处理后的视频帧大小，默认为224x224像素
             video_sample_rate: 视频帧采样率，默认为4
             max_text_length: 处理后的最大文本长度，默认为512
+            audio_sample_rate: 音频采样率，默认为16000Hz
+            max_audio_length: 最大音频长度，默认为10秒
         """
         # 创建各个模态的处理器
         
@@ -403,53 +410,116 @@ class MultiModalProcessor:
             tokenizer=tokenizer,             # 分词器
             max_length=max_text_length,      # 最大文本长度
         )
+        
+        # 音频处理器 - 处理音频输入
+        self.audio_processor = AudioProcessor(
+            sample_rate=audio_sample_rate,   # 采样率
+            max_length=max_audio_length,     # 最大长度
+        )
     
     def process_sample(
         self,
         text: Optional[str] = None,           # 可选的文本输入
         image_path: Optional[str] = None,      # 可选的图像路径
         video_path: Optional[str] = None,      # 可选的视频路径
+        audio_path: Optional[str] = None,      # 可选的音频路径
+        text_output: Optional[str] = None,     # 可选的文本输出
+        image_output_path: Optional[str] = None, # 可选的图像输出路径
+        video_output_path: Optional[str] = None, # 可选的视频输出路径
+        audio_output_path: Optional[str] = None, # 可选的音频输出路径
+        output_modality: Optional[int] = None,  # 输出模态类型
     ) -> Dict[str, Any]:
         """
         处理单个多模态样本
         
-        可以同时处理文本、图像和视频，或者它们的任意组合。
+        可以同时处理文本、图像、视频和音频，或者它们的任意组合。
         每种模态都是可选的，只处理提供的模态。
         
         Args:
             text: 输入文本字符串
             image_path: 图像文件路径
             video_path: 视频文件路径
+            audio_path: 音频文件路径
+            text_output: 文本输出
+            image_output_path: 图像输出文件路径
+            video_output_path: 视频输出文件路径
+            audio_output_path: 音频输出文件路径
+            output_modality: 输出模态类型 (0:文本, 1:图像, 2:视频, 3:音频)
             
         Returns:
             Dict[str, Any]: 包含处理后特征的字典，可能包含:
                 - input_ids, attention_mask: 文本特征
                 - image: 图像特征
                 - video: 视频特征
+                - audio: 音频特征
+                - labels: 文本输出特征
+                - image_output: 图像输出特征
+                - video_output: 视频输出特征
+                - audio_output: 音频输出特征
+                - output_modality: 输出模态类型
         """
         # 创建空字典存储所有特征
         features = {}
         
-        # 步骤1: 处理文本(如果提供)
+        # 步骤1: 处理输入文本(如果提供)
         if text is not None:
             # 使用文本处理器处理文本
             text_features = self.text_processor(text)
             # 将文本特征添加到总特征字典中
             features.update(text_features)
         
-        # 步骤2: 处理图像(如果提供)
+        # 步骤2: 处理输入图像(如果提供)
         if image_path is not None:
             # 使用图像处理器处理图像
             image_features = self.image_processor(image_path)
             # 将图像特征添加到总特征字典中
             features["image"] = image_features
         
-        # 步骤3: 处理视频(如果提供)
+        # 步骤3: 处理输入视频(如果提供)
         if video_path is not None:
             # 使用视频处理器处理视频
             video_features = self.video_processor(video_path)
             # 将视频特征添加到总特征字典中
             features["video"] = video_features
+        
+        # 步骤4: 处理输入音频(如果提供)
+        if audio_path is not None:
+            # 使用音频处理器处理音频
+            audio_features = self.audio_processor(audio_path)
+            # 将音频特征添加到总特征字典中
+            features["audio"] = audio_features
+        
+        # 步骤5: 处理输出文本(如果提供)
+        if text_output is not None:
+            # 使用文本处理器处理输出文本
+            text_output_features = self.text_processor(text_output)
+            # 将文本输出特征添加到总特征字典中
+            features["labels"] = text_output_features["input_ids"]
+        
+        # 步骤6: 处理输出图像(如果提供)
+        if image_output_path is not None:
+            # 使用图像处理器处理输出图像
+            image_output_features = self.image_processor(image_output_path)
+            # 将图像输出特征添加到总特征字典中
+            features["image_output"] = image_output_features
+        
+        # 步骤7: 处理输出视频(如果提供)
+        if video_output_path is not None:
+            # 使用视频处理器处理输出视频
+            video_output_features = self.video_processor(video_output_path)
+            # 将视频输出特征添加到总特征字典中
+            features["video_output"] = video_output_features
+        
+        # 步骤8: 处理输出音频(如果提供)
+        if audio_output_path is not None:
+            # 使用音频处理器处理输出音频
+            audio_output_features = self.audio_processor(audio_output_path)
+            # 将音频输出特征添加到总特征字典中
+            features["audio_output"] = audio_output_features
+        
+        # 步骤9: 添加输出模态类型(如果提供)
+        if output_modality is not None:
+            features["output_modality"] = torch.tensor(output_modality, dtype=torch.long)
         
         return features
     
@@ -458,11 +528,17 @@ class MultiModalProcessor:
         texts: Optional[List[str]] = None,           # 可选的文本列表
         image_paths: Optional[List[str]] = None,     # 可选的图像路径列表
         video_paths: Optional[List[str]] = None,     # 可选的视频路径列表
+        audio_paths: Optional[List[str]] = None,     # 可选的音频路径列表
+        text_outputs: Optional[List[str]] = None,    # 可选的文本输出列表
+        image_output_paths: Optional[List[str]] = None, # 可选的图像输出路径列表
+        video_output_paths: Optional[List[str]] = None, # 可选的视频输出路径列表
+        audio_output_paths: Optional[List[str]] = None, # 可选的音频输出路径列表
+        output_modalities: Optional[List[int]] = None, # 输出模态类型列表
     ) -> Dict[str, Any]:
         """
         批量处理多个多模态样本
         
-        可以同时处理多个文本、图像和视频，或者它们的任意组合。
+        可以同时处理多个文本、图像、视频和音频，或者它们的任意组合。
         每种模态都是可选的，只处理提供的模态。
         所有列表的长度应该相同，表示批次大小。
         
@@ -470,35 +546,86 @@ class MultiModalProcessor:
             texts: 输入文本字符串列表
             image_paths: 图像文件路径列表
             video_paths: 视频文件路径列表
+            audio_paths: 音频文件路径列表
+            text_outputs: 文本输出列表
+            image_output_paths: 图像输出文件路径列表
+            video_output_paths: 视频输出文件路径列表
+            audio_output_paths: 音频输出文件路径列表
+            output_modalities: 输出模态类型列表 (0:文本, 1:图像, 2:视频, 3:音频)
             
         Returns:
             Dict[str, Any]: 包含处理后特征批次的字典，可能包含:
                 - input_ids, attention_mask: 形状为[batch_size, ...]的文本特征
                 - image: 形状为[batch_size, ...]的图像特征
                 - video: 形状为[batch_size, ...]的视频特征
+                - audio: 形状为[batch_size, ...]的音频特征
+                - labels: 形状为[batch_size, ...]的文本输出特征
+                - image_output: 形状为[batch_size, ...]的图像输出特征
+                - video_output: 形状为[batch_size, ...]的视频输出特征
+                - audio_output: 形状为[batch_size, ...]的音频输出特征
+                - output_modality: 形状为[batch_size]的输出模态类型
         """
         # 创建空字典存储所有特征
         features = {}
         
-        # 步骤1: 批量处理文本(如果提供)
+        # 步骤1: 批量处理输入文本(如果提供)
         if texts is not None:
             # 使用文本处理器批量处理文本
             text_features = self.text_processor.process_batch(texts)
             # 将文本特征添加到总特征字典中
             features.update(text_features)
         
-        # 步骤2: 批量处理图像(如果提供)
+        # 步骤2: 批量处理输入图像(如果提供)
         if image_paths is not None:
             # 使用图像处理器批量处理图像
             image_features = self.image_processor.process_batch(image_paths)
             # 将图像特征添加到总特征字典中
             features["image"] = image_features
         
-        # 步骤3: 批量处理视频(如果提供)
+        # 步骤3: 批量处理输入视频(如果提供)
         if video_paths is not None:
             # 使用视频处理器批量处理视频
             video_features = self.video_processor.process_batch(video_paths)
             # 将视频特征添加到总特征字典中
             features["video"] = video_features
+        
+        # 步骤4: 批量处理输入音频(如果提供)
+        if audio_paths is not None:
+            # 使用音频处理器批量处理音频
+            audio_features = self.audio_processor.process_batch(audio_paths)
+            # 将音频特征添加到总特征字典中
+            features["audio"] = audio_features
+        
+        # 步骤5: 批量处理输出文本(如果提供)
+        if text_outputs is not None:
+            # 使用文本处理器批量处理输出文本
+            text_output_features = self.text_processor.process_batch(text_outputs)
+            # 将文本输出特征添加到总特征字典中
+            features["labels"] = text_output_features["input_ids"]
+        
+        # 步骤6: 批量处理输出图像(如果提供)
+        if image_output_paths is not None:
+            # 使用图像处理器批量处理输出图像
+            image_output_features = self.image_processor.process_batch(image_output_paths)
+            # 将图像输出特征添加到总特征字典中
+            features["image_output"] = image_output_features
+        
+        # 步骤7: 批量处理输出视频(如果提供)
+        if video_output_paths is not None:
+            # 使用视频处理器批量处理输出视频
+            video_output_features = self.video_processor.process_batch(video_output_paths)
+            # 将视频输出特征添加到总特征字典中
+            features["video_output"] = video_output_features
+        
+        # 步骤8: 批量处理输出音频(如果提供)
+        if audio_output_paths is not None:
+            # 使用音频处理器批量处理输出音频
+            audio_output_features = self.audio_processor.process_batch(audio_output_paths)
+            # 将音频输出特征添加到总特征字典中
+            features["audio_output"] = audio_output_features
+        
+        # 步骤9: 添加输出模态类型(如果提供)
+        if output_modalities is not None:
+            features["output_modality"] = torch.tensor(output_modalities, dtype=torch.long)
         
         return features

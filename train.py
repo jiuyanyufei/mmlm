@@ -1,12 +1,14 @@
 """
 多模态大模型训练脚本
 
-这个脚本用于训练一个能够处理文本、图像和视频的多模态大模型。
+这个脚本用于训练一个能够处理文本、图像、视频和音频的多模态大模型。
 主要功能包括:
 1. 加载和预处理多模态数据
 2. 构建多模态GPT模型
-3. 训练模型并保存检查点
+3. 训练模型并支持任意形态的输入和输出
 4. 记录训练过程和评估结果
+
+模型可以自己学习决定输出哪种模态，支持文本、图像、视频和音频的生成。
 """
 import os                       # 操作系统相关功能
 import argparse                 # 命令行参数解析
@@ -55,6 +57,11 @@ def parse_args():
         default="./data", 
         help="数据目录，用于解析相对路径"
     )
+    parser.add_argument(
+        "--enable_multimodal_output",
+        action="store_true",
+        help="是否启用多模态输出（模型自己学习决定输出哪种模态）"
+    )
     
     # ===== 模型参数 =====
     # 这些参数定义了模型的基本配置
@@ -75,6 +82,12 @@ def parse_args():
         type=str, 
         default="google/vit-base-patch16-224", 
         help="预训练视觉模型名称，如ViT模型"
+    )
+    parser.add_argument(
+        "--pretrained_audio_model", 
+        type=str, 
+        default="facebook/wav2vec2-base-960h", 
+        help="预训练音频模型名称，如Wav2Vec2模型"
     )
     
     # ===== 训练参数 =====
@@ -227,7 +240,7 @@ def main():
     logger.info(f"分词器词汇表大小: {len(tokenizer)}")
     
     # 创建多模态处理器
-    # 这个处理器负责处理文本、图像和视频输入
+    # 这个处理器负责处理文本、图像、视频和音频输入，以及多模态输出
     logger.info("创建多模态处理器")
     processor = MultiModalProcessor(
         tokenizer=tokenizer,       # 文本分词器
@@ -236,6 +249,8 @@ def main():
         frame_size=224,            # 视频帧大小
         video_sample_rate=4,       # 视频采样率
         max_text_length=512,       # 最大文本长度
+        audio_sample_rate=16000,   # 音频采样率
+        max_audio_length=10,       # 最大音频长度(秒)
     )
     
     # 创建训练和评估数据加载器
@@ -254,11 +269,18 @@ def main():
     # ===== 第3步: 构建模型 =====
     
     # 创建多模态GPT模型
-    logger.info(f"创建多模态GPT模型，基于: {args.pretrained_text_model} 和 {args.pretrained_vision_model}")
-    model = MultiModalGPT(
+    logger.info(f"创建多模态GPT模型，基于: {args.pretrained_text_model}、{args.pretrained_vision_model} 和 {args.pretrained_audio_model}")
+    
+    # 创建模型配置
+    model_config = ModelConfig(
         pretrained_text_model=args.pretrained_text_model,          # 预训练文本模型
         pretrained_vision_model=args.pretrained_vision_model,      # 预训练视觉模型
+        pretrained_audio_model=args.pretrained_audio_model,        # 预训练音频模型
+        enable_multimodal_output=args.enable_multimodal_output,    # 是否启用多模态输出
     )
+    
+    # 创建多模态GPT模型
+    model = MultiModalGPT(model_config)
     
     # 调整模型词汇表大小以匹配分词器
     # 这是必要的，因为我们添加了特殊标记

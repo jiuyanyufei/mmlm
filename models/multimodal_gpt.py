@@ -2,8 +2,9 @@
 多模态GPT模型
 
 这个文件定义了多模态GPT模型的核心架构，它能够处理文本、图像和视频输入，
-并将它们融合在一起生成文本输出。模型基于GPT-2架构，并添加了视觉编码器
-来处理图像和视频输入。
+并将它们融合在一起生成任意模态的输出（文本、图像、视频或音频）。
+模型基于GPT-2架构，并添加了视觉编码器来处理图像和视频输入，以及各种解码器
+来生成不同模态的输出。模型会自动学习决定输出哪种模态。
 """
 # PyTorch是深度学习的核心库
 import torch
@@ -16,6 +17,8 @@ from transformers import GPT2Model, GPT2Config, GPT2LMHeadModel
 
 # 导入我们自定义的视觉编码器，用于处理图像和视频
 from models.vision_encoder import ImageEncoder, VideoEncoder
+# 导入我们自定义的解码器，用于生成不同模态的输出
+from models.decoders import ImageDecoder, VideoDecoder, AudioDecoder, ModalityTypePredictor
 
 
 class MultiModalGPT(nn.Module):
@@ -27,12 +30,15 @@ class MultiModalGPT(nn.Module):
     2. 视频编码器 - 处理视频输入
     3. GPT2语言模型 - 处理文本输入和生成
     4. 多模态融合机制 - 将不同模态的特征融合在一起
+    5. 模态类型预测器 - 预测应该输出哪种模态
+    6. 多模态解码器 - 生成不同模态的输出（文本、图像、视频、音频）
     
     模型工作流程:
     1. 分别编码文本、图像和视频输入
     2. 为每种模态添加模态类型嵌入
     3. 融合所有模态的特征
-    4. 使用GPT2的语言模型头生成输出
+    4. 预测输出模态类型
+    5. 根据预测的模态类型，使用相应的解码器生成输出
     """
     
     def __init__(
@@ -55,6 +61,14 @@ class MultiModalGPT(nn.Module):
         projection_dim: int = 1024,           # 特征投影维度
         pretrained_text_model: str = "gpt2-medium",  # 预训练文本模型名称
         pretrained_vision_model: str = "google/vit-base-patch16-224",  # 预训练视觉模型
+        enable_multimodal_output: bool = True,  # 启用多模态输出
+        modality_type_size: int = 4,          # 模态类型数量：文本、图像、视频、音频
+        image_decoder_layers: int = 8,        # 图像解码器层数
+        image_decoder_heads: int = 16,        # 图像解码器注意力头数
+        video_decoder_layers: int = 8,        # 视频解码器层数
+        video_decoder_heads: int = 16,        # 视频解码器注意力头数
+        audio_decoder_layers: int = 6,        # 音频解码器层数
+        audio_decoder_heads: int = 12,        # 音频解码器注意力头数
     ):
         """
         初始化多模态GPT模型
@@ -137,6 +151,54 @@ class MultiModalGPT(nn.Module):
             ),
             num_layers=2,                         # Transformer层数
         )
+        
+        # 第7部分: 多模态输出支持
+        self.enable_multimodal_output = enable_multimodal_output
+        
+        if enable_multimodal_output:
+            # 创建模态类型预测器 - 预测应该输出哪种模态
+            self.modality_type_predictor = ModalityTypePredictor(
+                config=type('ModelConfig', (), {
+                    'hidden_size': projection_dim,
+                    'modality_type_size': modality_type_size
+                })
+            )
+            
+            # 创建各种模态的解码器
+            # 图像解码器 - 生成图像输出
+            self.image_decoder = ImageDecoder(
+                config=type('ModelConfig', (), {
+                    'hidden_size': projection_dim,
+                    'image_decoder_layers': image_decoder_layers,
+                    'image_decoder_heads': image_decoder_heads,
+                    'intermediate_size': intermediate_size,
+                    'vision_image_size': vision_image_size,
+                    'vision_patch_size': vision_patch_size
+                })
+            )
+            
+            # 视频解码器 - 生成视频输出
+            self.video_decoder = VideoDecoder(
+                config=type('ModelConfig', (), {
+                    'hidden_size': projection_dim,
+                    'video_decoder_layers': video_decoder_layers,
+                    'video_decoder_heads': video_decoder_heads,
+                    'intermediate_size': intermediate_size,
+                    'video_frames': video_frames,
+                    'video_frame_size': vision_image_size,
+                    'vision_patch_size': vision_patch_size
+                })
+            )
+            
+            # 音频解码器 - 生成音频输出
+            self.audio_decoder = AudioDecoder(
+                config=type('ModelConfig', (), {
+                    'hidden_size': projection_dim,
+                    'audio_decoder_layers': audio_decoder_layers,
+                    'audio_decoder_heads': audio_decoder_heads,
+                    'intermediate_size': intermediate_size
+                })
+            )
     
     def forward(
         self,
@@ -144,7 +206,11 @@ class MultiModalGPT(nn.Module):
         attention_mask: Optional[torch.Tensor] = None, # 文本注意力掩码
         image: Optional[torch.Tensor] = None,          # 图像输入
         video: Optional[torch.Tensor] = None,          # 视频输入
-        labels: Optional[torch.Tensor] = None,         # 用于计算损失的标签
+        labels: Optional[torch.Tensor] = None,         # 用于计算文本损失的标签
+        output_modality: Optional[torch.Tensor] = None, # 输出模态类型标签
+        image_output: Optional[torch.Tensor] = None,   # 图像输出标签
+        video_output: Optional[torch.Tensor] = None,   # 视频输出标签
+        audio_output: Optional[torch.Tensor] = None,   # 音频输出标签
     ) -> Dict[str, torch.Tensor]:
         """
         模型的前向传播函数 - 处理输入并生成输出
@@ -275,42 +341,171 @@ class MultiModalGPT(nn.Module):
             fused_embeds = all_embeds[0]
             multimodal_mask = all_masks[0]
         
-        # 第7步: 生成输出logits
-        # 使用GPT2的语言模型头将融合后的特征转换为词汇表上的概率分布
-        lm_logits = self.text_model.lm_head(fused_embeds)  # [batch_size, seq_len, vocab_size]
+        # 第7步: 处理多模态输出
+        outputs = {}
         
-        # 创建输出字典
-        outputs = {"logits": lm_logits}
+        # 如果启用了多模态输出
+        if self.enable_multimodal_output:
+            # 预测输出模态类型
+            modality_logits = self.modality_type_predictor(fused_embeds)
+            outputs["modality_logits"] = modality_logits
+            
+            # 根据预测的模态类型生成不同的输出
+            # 0: 文本, 1: 图像, 2: 视频, 3: 音频
+            
+            # 文本输出 - 使用GPT2的语言模型头
+            text_logits = self.text_model.lm_head(fused_embeds)
+            outputs["text_logits"] = text_logits
+            
+            # 图像输出 - 使用图像解码器
+            image_output_pred = self.image_decoder(fused_embeds)
+            outputs["image_output"] = image_output_pred
+            
+            # 视频输出 - 使用视频解码器
+            video_output_pred = self.video_decoder(fused_embeds)
+            outputs["video_output"] = video_output_pred
+            
+            # 音频输出 - 使用音频解码器
+            audio_output_pred = self.audio_decoder(fused_embeds)
+            outputs["audio_output"] = audio_output_pred
+            
+            # 计算损失
+            total_loss = 0.0
+            
+            # 模态类型预测损失
+            if output_modality is not None:
+                modality_loss_fct = nn.CrossEntropyLoss()
+                modality_loss = modality_loss_fct(
+                    modality_logits.view(-1, modality_logits.size(-1)),
+                    output_modality.view(-1)
+                )
+                outputs["modality_loss"] = modality_loss
+                total_loss += modality_loss
+            
+            # 文本生成损失
+            if labels is not None:
+                # 确定文本部分的长度
+                text_len = text_embeds.shape[1] if text_embeds is not None else 0
+                
+                # 确保标签与logits形状匹配
+                if text_len < text_logits.shape[1]:
+                    # 如果融合后的序列长于文本序列，只使用相关部分的logits计算损失
+                    text_logits_for_loss = text_logits[:, -text_len:, :]
+                else:
+                    text_logits_for_loss = text_logits
+                
+                # 计算语言模型损失
+                shift_logits = text_logits_for_loss[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                
+                text_loss_fct = nn.CrossEntropyLoss()
+                text_loss = text_loss_fct(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1)
+                )
+                outputs["text_loss"] = text_loss
+                
+                # 只有当输出模态是文本时才添加文本损失
+                if output_modality is not None:
+                    # 创建文本模态掩码 (1 where output_modality == 0, 0 elsewhere)
+                    text_modality_mask = (output_modality == 0).float()
+                    # 应用掩码到损失
+                    masked_text_loss = text_loss * text_modality_mask.mean()
+                    total_loss += masked_text_loss
+                else:
+                    total_loss += text_loss
+            
+            # 图像生成损失
+            if image_output is not None and output_modality is not None:
+                # 只对输出模态为图像的样本计算损失
+                image_modality_mask = (output_modality == 1).float()
+                
+                if image_modality_mask.sum() > 0:
+                    # 使用MSE损失计算图像生成损失
+                    image_loss_fct = nn.MSELoss(reduction='none')
+                    image_loss = image_loss_fct(
+                        image_output_pred, 
+                        image_output
+                    ).mean(dim=[1, 2, 3])  # 平均到每个样本
+                    
+                    # 应用掩码
+                    masked_image_loss = (image_loss * image_modality_mask).sum() / max(image_modality_mask.sum(), 1)
+                    outputs["image_loss"] = masked_image_loss
+                    total_loss += masked_image_loss
+            
+            # 视频生成损失
+            if video_output is not None and output_modality is not None:
+                # 只对输出模态为视频的样本计算损失
+                video_modality_mask = (output_modality == 2).float()
+                
+                if video_modality_mask.sum() > 0:
+                    # 使用MSE损失计算视频生成损失
+                    video_loss_fct = nn.MSELoss(reduction='none')
+                    video_loss = video_loss_fct(
+                        video_output_pred, 
+                        video_output
+                    ).mean(dim=[1, 2, 3, 4])  # 平均到每个样本
+                    
+                    # 应用掩码
+                    masked_video_loss = (video_loss * video_modality_mask).sum() / max(video_modality_mask.sum(), 1)
+                    outputs["video_loss"] = masked_video_loss
+                    total_loss += masked_video_loss
+            
+            # 音频生成损失
+            if audio_output is not None and output_modality is not None:
+                # 只对输出模态为音频的样本计算损失
+                audio_modality_mask = (output_modality == 3).float()
+                
+                if audio_modality_mask.sum() > 0:
+                    # 使用MSE损失计算音频生成损失
+                    audio_loss_fct = nn.MSELoss(reduction='none')
+                    audio_loss = audio_loss_fct(
+                        audio_output_pred, 
+                        audio_output
+                    ).mean(dim=[1, 2])  # 平均到每个样本
+                    
+                    # 应用掩码
+                    masked_audio_loss = (audio_loss * audio_modality_mask).sum() / max(audio_modality_mask.sum(), 1)
+                    outputs["audio_loss"] = masked_audio_loss
+                    total_loss += masked_audio_loss
+            
+            # 添加总损失
+            if total_loss > 0:
+                outputs["loss"] = total_loss
         
-        # 第8步: 计算损失(如果提供了标签)
-        if labels is not None:
-            # 确定文本部分的长度
-            text_len = text_embeds.shape[1] if text_embeds is not None else 0
+        # 如果没有启用多模态输出，则只生成文本输出
+        else:
+            # 使用GPT2的语言模型头将融合后的特征转换为词汇表上的概率分布
+            lm_logits = self.text_model.lm_head(fused_embeds)  # [batch_size, seq_len, vocab_size]
             
-            # 确保标签与logits形状匹配
-            if text_len < lm_logits.shape[1]:
-                # 如果融合后的序列长于文本序列，只使用相关部分的logits计算损失
-                # 这通常是序列的后半部分，对应于我们想要预测的文本
-                text_logits = lm_logits[:, -text_len:, :]
-            else:
-                text_logits = lm_logits
+            # 创建输出字典
+            outputs["logits"] = lm_logits
             
-            # 计算语言模型损失
-            # 在语言模型中，我们预测下一个标记，所以需要错开输入和标签
-            # 输入: [A, B, C, D] -> 预测: [B, C, D, E]
-            # 因此我们使用[:-1]和[1:]来创建这种错位
-            shift_logits = text_logits[..., :-1, :].contiguous()  # 去掉最后一个位置
-            shift_labels = labels[..., 1:].contiguous()           # 去掉第一个位置
-            
-            # 使用交叉熵损失函数
-            loss_fct = nn.CrossEntropyLoss()
-            # 重塑张量以适应损失函数的输入要求
-            loss = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)),  # [batch_size*seq_len, vocab_size]
-                shift_labels.view(-1)                          # [batch_size*seq_len]
-            )
-            
-            # 将损失添加到输出字典
-            outputs["loss"] = loss
+            # 计算损失(如果提供了标签)
+            if labels is not None:
+                # 确定文本部分的长度
+                text_len = text_embeds.shape[1] if text_embeds is not None else 0
+                
+                # 确保标签与logits形状匹配
+                if text_len < lm_logits.shape[1]:
+                    # 如果融合后的序列长于文本序列，只使用相关部分的logits计算损失
+                    text_logits = lm_logits[:, -text_len:, :]
+                else:
+                    text_logits = lm_logits
+                
+                # 计算语言模型损失
+                shift_logits = text_logits[..., :-1, :].contiguous()  # 去掉最后一个位置
+                shift_labels = labels[..., 1:].contiguous()           # 去掉第一个位置
+                
+                # 使用交叉熵损失函数
+                loss_fct = nn.CrossEntropyLoss()
+                # 重塑张量以适应损失函数的输入要求
+                loss = loss_fct(
+                    shift_logits.view(-1, shift_logits.size(-1)),  # [batch_size*seq_len, vocab_size]
+                    shift_labels.view(-1)                          # [batch_size*seq_len]
+                )
+                
+                # 将损失添加到输出字典
+                outputs["loss"] = loss
         
         return outputs
